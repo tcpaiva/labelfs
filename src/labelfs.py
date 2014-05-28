@@ -9,7 +9,7 @@ import errno
 from fuse import FUSE, FuseOSError, Operations
 
 
-class Passthrough(Operations):
+class LabelFS(Operations):
     
     chmod = None
     chown = None
@@ -25,6 +25,14 @@ class Passthrough(Operations):
         except OSError:
             if not os.path.isdir(all_files_path):
                 raise
+        
+        labels = []
+        for i in os.listdir(self.root):
+            if os.path.isdir(os.path.join(self.root, i)):
+                labels.append(i)
+        print "labels:", labels
+    
+                    
 
     # Helpers
     # =======
@@ -76,13 +84,19 @@ class Passthrough(Operations):
         print "path:", path
         print "fh", fh
         
-        head, tail = os.path.split(path)
-        label_path = os.path.join(self.root, tail)
+        path  = path[1:] if path.startswith("/") else path
+        labels = path.split(os.sep)
+
+        contents = []
+        for label in labels:
+            label_path = os.path.join(self.root, label)
+            content = os.listdir(label_path)
+            contents.append(content)
 
         dirents = ['.', '..']
-        if os.path.isdir(label_path):
-            dirents.extend(os.listdir(label_path))
-        
+        dirents.extend(set.intersection(*map(set, contents)))
+        print "dirents:", dirents
+
         for r in dirents:
             yield r
 
@@ -116,19 +130,20 @@ class Passthrough(Operations):
     
         for i in labels:
             print "i:", i
-            orig = os.path.join(self.root, i)
-            print "orig:", orig
-            for j in labels:
-                print "j:", j
-                if i != j:
-                    try:
-                        target = os.path.join('..', j)
-                        print "target:", target
-                        link = os.path.join(orig, j)
-                        print "link:", link
-                        lh =  os.symlink(target, link)
-                    except:
-                        pass
+            if i != self.all_files_label:
+                orig = os.path.join(self.root, i)
+                print "orig:", orig
+                for j in labels:
+                    print "j:", j
+                    if (i != j and j != self.all_files_label):
+                        try:
+                            target = os.path.join('..', j)
+                            print "target:", target
+                            link = os.path.join(orig, j)
+                            print "link:", link
+                            lh =  os.symlink(target, link)
+                        except:
+                            pass
                 
         return re
 
@@ -184,14 +199,18 @@ class Passthrough(Operations):
             except:
                 pass
         print "labels:", labels
+        
+        target = os.path.join('..', file_name)
+        print "target:", target
+        
         for label in labels:
-            target = os.path.join('..', file_name)
-            print "target:", target
-            link = os.path.join(self.root, label)
-            print "link:", link
-            link = os.path.join(link, file_name)
+            link = os.path.join(self.root, label, file_name)
             print "link:", link
             lh =  os.symlink(target, link)
+            
+        link = os.path.join(self.root, self.all_files_label, file_name)
+        print "link:", link
+        lh =  os.symlink(target, link)
         
         return fh
 
@@ -222,7 +241,7 @@ class Passthrough(Operations):
 
 
 def main(mountpoint, root):
-    FUSE(Passthrough(root), mountpoint, foreground=True)
+    FUSE(LabelFS(root), mountpoint, foreground=True)
 
 if __name__ == '__main__':
     main(sys.argv[2], sys.argv[1])
