@@ -15,24 +15,26 @@ class LabelFS(Operations):
     chown = None
     mknod = None 
     
-    def __init__(self, root):
-        self.root = root
-        print "root:", self.root
-        self.all_files_label = "all_files"
-        all_files_path = os.path.join(self.root, self.all_files_label)
+    def __init__(self, root_path, mnt_path):
+        self.root_path = root_path
+        self.mnt_path = mnt_path
+        self.files_path = os.path.join(self.root_path, ".files")
+        print("root:", self.root_path, "mnt:", self.mnt_path, "files:", self.files_path)
+
         try: 
-            os.mkdir(all_files_path)
+            os.mkdir(self.files_path)
         except OSError:
-            if not os.path.isdir(all_files_path):
-                raise
+            if not os.path.isdir(self.files_path):
+                 raise
         
-        labels = []
-        for i in os.listdir(self.root):
-            if os.path.isdir(os.path.join(self.root, i)):
-                labels.append(i)
-        print "labels:", labels
-    
-                    
+        self.labels_roll = []
+        for item in os.listdir(self.root_path):
+            if not item.startswith("."):
+                curr_path = os.path.join(self.root_path, item)
+                if os.path.isdir(curr_path):
+                    self.labels_roll.append(item)
+        print "labels:", self.labels_roll
+
 
     # Helpers
     # =======
@@ -40,12 +42,12 @@ class LabelFS(Operations):
     def _full_path(self, partial):
         if partial.startswith(os.sep):
             partial = partial[1:]
-        path = os.path.join(self.root, partial)
+        path = os.path.join(self.root_path, partial)
         return path
 
     def _get_components(self, path):
         head, file_name = os.path.split(path)
-        relative_path = os.path.relpath(head, self.root)
+        relative_path = os.path.relpath(head, self.root_path)
         labels = relative_path.split(os.sep)
         return labels, file_name
     
@@ -53,14 +55,14 @@ class LabelFS(Operations):
         if path.startswith("/"):
             path = path[1:]
         head, file_name = os.path.split(path)
-        real_path = os.path.join(self.root, file_name)
+        real_path = os.path.join(self.root_path, file_name)
         return real_path
     
     def _labels(self, path):
         if path.startswith("/"):
             path = path[1:]
         head, tail = os.path.split(path)
-        relative_path = os.path.relpath(head, self.root)
+        relative_path = os.path.relpath(head, self.root_path)
         labels = relative_path.split(os.sep)
         return labels
 
@@ -70,33 +72,87 @@ class LabelFS(Operations):
     def access(self, path, mode):
         print "access"
 
+        path = path[1:] if path.startswith("/") else path
+        print path
+
+        others, label = os.path.split(path) 
+        full_path = os.path.join(self.root_path, label)
+
+        if not os.access(full_path, mode):
+            raise FuseOSError(errno.EACCES)
+
+
     def getattr(self, path, fh=None):
         print "getattr"
         print "path:", path
         print "fh", fh
-        full_path = self._full_path(path)
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+
+        # sanitize path
+        path = path[1:] if path.startswith("/") else path
+        print "path:", path
+
+        # keys for stat
+        keys = ['st_atime', 'st_ctime', 'st_gid', 'st_mode', 
+                 'st_mtime', 'st_nlink', 'st_size', 'st_uid']
+
+        # get the last field from path
+        others, name = os.path.split(path)
+        print "others:", others, "name:", name
+        
+
+        if others != "" and name not in self.labels_roll:
+            target_path = os.path.join(self.files_path, name)
+        else:
+            target_path = os.path.join(self.root_path, name)
+        print "target_path:", target_path
+        st = os.lstat(target_path)            
+
+        attr = dict((key, getattr(st, key)) for key in keys)
+        print "attr:", attr
+
+        return attr
+
 
     def readdir(self, path, fh):
         print "readdir"
         print "path:", path
         print "fh", fh
-        
-        path  = path[1:] if path.startswith("/") else path
-        labels = path.split(os.sep)
 
-        contents = []
-        for label in labels:
-            label_path = os.path.join(self.root, label)
-            content = os.listdir(label_path)
-            contents.append(content)
+        # sanitize path
+        path  = path[1:] if path.startswith("/") else path
+
+        # break path into valid labels
+        labels = [x for x in path.split(os.sep) if x in self.labels_roll]
+        print "labels:", labels
 
         dirents = ['.', '..']
-        dirents.extend(set.intersection(*map(set, contents)))
-        print "dirents:", dirents
 
+        # labels are always prepended in ls command
+        available_labels = [x for x in self.labels_roll if x not in labels]
+        print "available_labels:", available_labels
+        dirents.extend(available_labels) 
+
+        # get instersection of each label contents
+        all_files = []
+        for label in labels:
+            label_path  = os.path.join(self.root_path, label)
+            print "label_path:", label_path
+            curr_files = os.listdir(label_path)
+            print "curr_files:", curr_files
+            all_files.append(curr_files)
+            
+
+        if len(all_files) == 0:
+            files = []
+        elif len(all_files) == 1:
+            files = all_files[0]
+        else:
+            files = list(set.intersection(*map(set, all_files)))
+        print "files:", files
+
+        dirents.extend(files)
+        print "dirents:", dirents
+            
         for r in dirents:
             yield r
 
@@ -119,32 +175,24 @@ class LabelFS(Operations):
     def mkdir(self, path, mode):
         print "mkdir"
         print "path:", path
-        head, tail = os.path.split(path)
-        label_path = os.path.join(self.root, tail)
+        
+        # sanitize path
+        path = path[1:] if path.startswith("/") else path
+
+        # get name
+        head, label_name = os.path.split(path)
+
+        # always in root path
+        label_path = os.path.join(self.root_path, label_name)
         print "label_path:", label_path
+
+        # create directory
         re = os.mkdir(label_path, mode)
         print "return:", re
+        
+        # update list
+        self.labels_roll.append(label_name)
 
-        labels = [d for d in os.listdir(self.root) if os.path.isdir(os.path.join(self.root, d))]
-        print "labels:", labels
-    
-        for i in labels:
-            print "i:", i
-            if i != self.all_files_label:
-                orig = os.path.join(self.root, i)
-                print "orig:", orig
-                for j in labels:
-                    print "j:", j
-                    if (i != j and j != self.all_files_label):
-                        try:
-                            target = os.path.join('..', j)
-                            print "target:", target
-                            link = os.path.join(orig, j)
-                            print "link:", link
-                            lh =  os.symlink(target, link)
-                        except:
-                            pass
-                
         return re
 
 
@@ -241,7 +289,7 @@ class LabelFS(Operations):
 
 
 def main(mountpoint, root):
-    FUSE(LabelFS(root), mountpoint, foreground=True)
+    FUSE(LabelFS(root, mountpoint), mountpoint, foreground=True)
 
 if __name__ == '__main__':
     main(sys.argv[2], sys.argv[1])
