@@ -22,6 +22,7 @@ Design
 Expected result
 ---------------
 
+```
 mount_point\
      file
      dir_0\
@@ -39,11 +40,12 @@ mount_point\
 	file_02
 	file_12
 	file_012
-
+```
 
 Structure
 ---------
 
+```
 labelfs_root\
     .files\
 	file -------------------------------------+
@@ -70,5 +72,5 @@ labelfs_root\
 	link_to_file_12 ----------------------+ | |
 	link_to_file_012 -----------------------+ |
     file -----------------------------------------+
-
+```
 
