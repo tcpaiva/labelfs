@@ -5,8 +5,15 @@ from __future__ import with_statement
 import os
 import sys
 import errno
+import hashlib
 
 from fuse import FUSE, FuseOSError, Operations
+
+
+class OpenedFiles:
+    def __init__(self, file_path, tmp_file):
+        self.file_path = file_path
+        self.tmp_file = tmp_file
 
 
 class LabelFS(Operations):
@@ -38,6 +45,9 @@ class LabelFS(Operations):
 
     # Helpers
     # =======
+
+    def _get_hash(self):
+        pass
 
     def _full_path(self, partial):
         if partial.startswith(os.sep):
@@ -98,14 +108,15 @@ class LabelFS(Operations):
         # get the last field from path
         others, name = os.path.split(path)
         print "others:", others, "name:", name
-        
 
         if others != "" and name not in self.labels_roll:
-            target_path = os.path.join(self.files_path, name)
+            labels = [x for x in others.split(os.sep) if x in self.labels_roll]
+            print "labels:", labels
+            target_path = os.path.join(self.root_path, labels[0], name)
         else:
             target_path = os.path.join(self.root_path, name)
         print "target_path:", target_path
-        st = os.lstat(target_path)            
+        st = os.stat(target_path)            
 
         attr = dict((key, getattr(st, key)) for key in keys)
         print "attr:", attr
@@ -196,7 +207,6 @@ class LabelFS(Operations):
         return re
 
 
-
     def statfs(self, path):
         print "statfs"
 
@@ -220,47 +230,33 @@ class LabelFS(Operations):
 
     def open(self, path, flags):
         print "open"
-        real_path = self._real_path(path)
-        fh = os.open(real_path, flags)
+
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        file_path = os.readlink(os.path.join(self.root_path, path))
+        fh = os.open(file_path, flags)
         return fh
+
 
     def create(self, path, mode, fi=None):
         print "create"
         print "path:", path
-        
-        real_path = self._real_path(path)
-        print "real_path:", real_path
-        
-        fh = os.open(real_path, os.O_WRONLY | os.O_CREAT, mode)
-        print "fh:", fh
-        
-        
-        full_path = self._full_path(path)
-        fp_head, file_name = os.path.split(full_path)
-        print "fp_head:", fp_head
-        labels = fp_head.split(os.sep)
 
-        not_labels = self.root.split(os.sep)
-        for not_label in not_labels:
-            try:
-                labels.remove(not_label)
-            except:
-                pass
-        print "labels:", labels
-        
-        target = os.path.join('..', file_name)
-        print "target:", target
-        
-        for label in labels:
-            link = os.path.join(self.root, label, file_name)
-            print "link:", link
-            lh =  os.symlink(target, link)
-            
-        link = os.path.join(self.root, self.all_files_label, file_name)
-        print "link:", link
-        lh =  os.symlink(target, link)
-        
-        return fh
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        file_path = os.path.join(self.files_path, file_name)
+        return os.open(file_path, os.O_WRONLY | os.O_CREAT, mode)
+
 
     def read(self, path, length, offset, fh):
         print "read"
@@ -269,8 +265,12 @@ class LabelFS(Operations):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
+
     def write(self, path, buf, offset, fh):
         print "write"
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.write(fh, buf)
+
 
     def truncate(self, path, length, fh=None):
         print "truncate"
@@ -282,7 +282,40 @@ class LabelFS(Operations):
         print "release"
         print "path:", path
         print "fh:", fh
-        return os.close(fh)
+
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        re = os.close(fh)
+
+        old_path = os.path.join(self.files_path, file_name)
+        print "old_path:", old_path
+
+        unique = hashlib.sha256()
+        with open(old_path,'rb') as f: 
+            for chunk in iter(lambda: f.read(128 * unique.block_size), b''): 
+                unique.update(chunk)
+        new_path = os.path.join(self.files_path, unique.hexdigest())
+        print "new_path:", new_path
+
+        os.rename(old_path, new_path)
+
+        labels = [x for x in path.split(os.sep) if x in self.labels_roll]
+        print "labels:", labels
+        
+        for label in labels:
+            dest_path = os.path.join(self.root_path, label)
+            relative_path = os.path.relpath(self.files_path, dest_path)
+            tmp = os.path.join(dest_path, file_name)
+            print "tmp:", tmp
+            os.symlink(os.path.join(relative_path, unique.hexdigest()), tmp)
+
+        return re
+
 
     def fsync(self, path, fdatasync, fh):
         print "fsync"
