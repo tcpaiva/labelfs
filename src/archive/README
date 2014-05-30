@@ -1,0 +1,3 @@
+passthrough -> somente classe Passtrough(Operations)
+mk -> original
+labelfsv2 -> não funciona pois FUSE() é chamado várias vezes.

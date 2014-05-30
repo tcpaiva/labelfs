@@ -5,39 +5,59 @@ from __future__ import with_statement
 import os
 import sys
 import errno
+import hashlib
 
 from fuse import FUSE, FuseOSError, Operations
 
 
-class Passthrough(Operations):
+class OpenedFiles:
+    def __init__(self, file_path, tmp_file):
+        self.file_path = file_path
+        self.tmp_file = tmp_file
+
+
+class LabelFS(Operations):
     
     chmod = None
     chown = None
     mknod = None 
     
-    def __init__(self, root):
-        self.root = root
-        print "root:", self.root
-        self.all_files_label = "all_files"
-        all_files_path = os.path.join(self.root, self.all_files_label)
+    def __init__(self, root_path, mnt_path):
+        self.root_path = root_path
+        self.mnt_path = mnt_path
+        self.files_path = os.path.join(self.root_path, ".files")
+        print("root:", self.root_path, "mnt:", self.mnt_path, "files:", self.files_path)
+
         try: 
-            os.mkdir(all_files_path)
+            os.mkdir(self.files_path)
         except OSError:
-            if not os.path.isdir(all_files_path):
-                raise
+            if not os.path.isdir(self.files_path):
+                 raise
+        
+        self.labels_roll = []
+        for item in os.listdir(self.root_path):
+            if not item.startswith("."):
+                curr_path = os.path.join(self.root_path, item)
+                if os.path.isdir(curr_path):
+                    self.labels_roll.append(item)
+        print "labels:", self.labels_roll
+
 
     # Helpers
     # =======
 
+    def _get_hash(self):
+        pass
+
     def _full_path(self, partial):
         if partial.startswith(os.sep):
             partial = partial[1:]
-        path = os.path.join(self.root, partial)
+        path = os.path.join(self.root_path, partial)
         return path
 
     def _get_components(self, path):
         head, file_name = os.path.split(path)
-        relative_path = os.path.relpath(head, self.root)
+        relative_path = os.path.relpath(head, self.root_path)
         labels = relative_path.split(os.sep)
         return labels, file_name
     
@@ -45,14 +65,14 @@ class Passthrough(Operations):
         if path.startswith("/"):
             path = path[1:]
         head, file_name = os.path.split(path)
-        real_path = os.path.join(self.root, file_name)
+        real_path = os.path.join(self.root_path, file_name)
         return real_path
     
     def _labels(self, path):
         if path.startswith("/"):
             path = path[1:]
         head, tail = os.path.split(path)
-        relative_path = os.path.relpath(head, self.root)
+        relative_path = os.path.relpath(head, self.root_path)
         labels = relative_path.split(os.sep)
         return labels
 
@@ -62,27 +82,88 @@ class Passthrough(Operations):
     def access(self, path, mode):
         print "access"
 
+        path = path[1:] if path.startswith("/") else path
+        print path
+
+        others, label = os.path.split(path) 
+        full_path = os.path.join(self.root_path, label)
+
+        if not os.access(full_path, mode):
+            raise FuseOSError(errno.EACCES)
+
+
     def getattr(self, path, fh=None):
         print "getattr"
         print "path:", path
         print "fh", fh
-        full_path = self._full_path(path)
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+
+        # sanitize path
+        path = path[1:] if path.startswith("/") else path
+        print "path:", path
+
+        # keys for stat
+        keys = ['st_atime', 'st_ctime', 'st_gid', 'st_mode', 
+                 'st_mtime', 'st_nlink', 'st_size', 'st_uid']
+
+        # get the last field from path
+        others, name = os.path.split(path)
+        print "others:", others, "name:", name
+
+        if others != "" and name not in self.labels_roll:
+            labels = [x for x in others.split(os.sep) if x in self.labels_roll]
+            print "labels:", labels
+            target_path = os.path.join(self.root_path, labels[0], name)
+        else:
+            target_path = os.path.join(self.root_path, name)
+        print "target_path:", target_path
+        st = os.stat(target_path)            
+
+        attr = dict((key, getattr(st, key)) for key in keys)
+        print "attr:", attr
+
+        return attr
+
 
     def readdir(self, path, fh):
         print "readdir"
         print "path:", path
         print "fh", fh
-        
-        head, tail = os.path.split(path)
-        label_path = os.path.join(self.root, tail)
+
+        # sanitize path
+        path  = path[1:] if path.startswith("/") else path
+
+        # break path into valid labels
+        labels = [x for x in path.split(os.sep) if x in self.labels_roll]
+        print "labels:", labels
 
         dirents = ['.', '..']
-        if os.path.isdir(label_path):
-            dirents.extend(os.listdir(label_path))
-        
+
+        # labels are always prepended in ls command
+        available_labels = [x for x in self.labels_roll if x not in labels]
+        print "available_labels:", available_labels
+        dirents.extend(available_labels) 
+
+        # get instersection of each label contents
+        all_files = []
+        for label in labels:
+            label_path  = os.path.join(self.root_path, label)
+            print "label_path:", label_path
+            curr_files = os.listdir(label_path)
+            print "curr_files:", curr_files
+            all_files.append(curr_files)
+            
+
+        if len(all_files) == 0:
+            files = []
+        elif len(all_files) == 1:
+            files = all_files[0]
+        else:
+            files = list(set.intersection(*map(set, all_files)))
+        print "files:", files
+
+        dirents.extend(files)
+        print "dirents:", dirents
+            
         for r in dirents:
             yield r
 
@@ -105,33 +186,25 @@ class Passthrough(Operations):
     def mkdir(self, path, mode):
         print "mkdir"
         print "path:", path
-        head, tail = os.path.split(path)
-        label_path = os.path.join(self.root, tail)
+        
+        # sanitize path
+        path = path[1:] if path.startswith("/") else path
+
+        # get name
+        head, label_name = os.path.split(path)
+
+        # always in root path
+        label_path = os.path.join(self.root_path, label_name)
         print "label_path:", label_path
+
+        # create directory
         re = os.mkdir(label_path, mode)
         print "return:", re
+        
+        # update list
+        self.labels_roll.append(label_name)
 
-        labels = [d for d in os.listdir(self.root) if os.path.isdir(os.path.join(self.root, d))]
-        print "labels:", labels
-    
-        for i in labels:
-            print "i:", i
-            orig = os.path.join(self.root, i)
-            print "orig:", orig
-            for j in labels:
-                print "j:", j
-                if i != j:
-                    try:
-                        target = os.path.join('..', j)
-                        print "target:", target
-                        link = os.path.join(orig, j)
-                        print "link:", link
-                        lh =  os.symlink(target, link)
-                    except:
-                        pass
-                
         return re
-
 
 
     def statfs(self, path):
@@ -157,43 +230,33 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         print "open"
-        real_path = self._real_path(path)
-        fh = os.open(real_path, flags)
+
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        file_path = os.readlink(os.path.join(self.root_path, path))
+        fh = os.open(file_path, flags)
         return fh
+
 
     def create(self, path, mode, fi=None):
         print "create"
         print "path:", path
-        
-        real_path = self._real_path(path)
-        print "real_path:", real_path
-        
-        fh = os.open(real_path, os.O_WRONLY | os.O_CREAT, mode)
-        print "fh:", fh
-        
-        
-        full_path = self._full_path(path)
-        fp_head, file_name = os.path.split(full_path)
-        print "fp_head:", fp_head
-        labels = fp_head.split(os.sep)
 
-        not_labels = self.root.split(os.sep)
-        for not_label in not_labels:
-            try:
-                labels.remove(not_label)
-            except:
-                pass
-        print "labels:", labels
-        for label in labels:
-            target = os.path.join('..', file_name)
-            print "target:", target
-            link = os.path.join(self.root, label)
-            print "link:", link
-            link = os.path.join(link, file_name)
-            print "link:", link
-            lh =  os.symlink(target, link)
-        
-        return fh
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        file_path = os.path.join(self.files_path, file_name)
+        return os.open(file_path, os.O_WRONLY | os.O_CREAT, mode)
+
 
     def read(self, path, length, offset, fh):
         print "read"
@@ -202,8 +265,12 @@ class Passthrough(Operations):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
+
     def write(self, path, buf, offset, fh):
         print "write"
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.write(fh, buf)
+
 
     def truncate(self, path, length, fh=None):
         print "truncate"
@@ -215,14 +282,47 @@ class Passthrough(Operations):
         print "release"
         print "path:", path
         print "fh:", fh
-        return os.close(fh)
+
+        # sanitize path
+        path = path[1:] if path.startswith(os.sep) else path
+
+        others, file_name = os.path.split(path)
+        if others == "":
+            raise FuseOSError(errno.EACCES)
+
+        re = os.close(fh)
+
+        old_path = os.path.join(self.files_path, file_name)
+        print "old_path:", old_path
+
+        unique = hashlib.sha256()
+        with open(old_path,'rb') as f: 
+            for chunk in iter(lambda: f.read(128 * unique.block_size), b''): 
+                unique.update(chunk)
+        new_path = os.path.join(self.files_path, unique.hexdigest())
+        print "new_path:", new_path
+
+        os.rename(old_path, new_path)
+
+        labels = [x for x in path.split(os.sep) if x in self.labels_roll]
+        print "labels:", labels
+        
+        for label in labels:
+            dest_path = os.path.join(self.root_path, label)
+            relative_path = os.path.relpath(self.files_path, dest_path)
+            tmp = os.path.join(dest_path, file_name)
+            print "tmp:", tmp
+            os.symlink(os.path.join(relative_path, unique.hexdigest()), tmp)
+
+        return re
+
 
     def fsync(self, path, fdatasync, fh):
         print "fsync"
 
 
 def main(mountpoint, root):
-    FUSE(Passthrough(root), mountpoint, foreground=True)
+    FUSE(LabelFS(root, mountpoint), mountpoint, foreground=True)
 
 if __name__ == '__main__':
     main(sys.argv[2], sys.argv[1])
